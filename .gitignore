@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+env/
+venv/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Model Checkpoints - NOW USING GIT LFS (see below)
+# To enable: git lfs install && git lfs track "checkpoints/*.pth"
+# checkpoints/*.pth  # REMOVED - now tracked with Git LFS
+# checkpoints/*.pt
+*.ckpt
+
+# Uploaded files
+uploads/
+temp/
+tmp/
+
+# Generated reports
+reports/*.json
+
+# Node.js / React
+frontend/node_modules/
+frontend/build/
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+*.log
+logs/
+
+# Audio files (samples - keep structure, exclude large datasets)
+# data/clips/ - uncomment if you don't want to include audio samples
+
+# Hugging Face cache
+.cache/
+~/.cache/huggingface/
+
+# Environment variables
+.env
+.env.local
+secrets.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+*.tar.gz
+*.zip
+
+# OS
+Thumbs.db
+.DS_Store

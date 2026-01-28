@@ -1,0 +1,33 @@
+# Core
+torch>=1.13.1
+torchaudio>=0.13.1
+transformers>=4.30.0
+
+# Audio processing
+soundfile>=0.12.1
+pydub>=0.25.1
+librosa>=0.10.0
+
+# ASR / Whisper (optional)
+openai-whisper>=20230314
+sentencepiece>=0.1.97
+
+# Data & utils
+numpy>=1.23.0
+pandas>=1.5.0
+tqdm>=4.64.0
+scikit-learn>=1.1.0
+
+# Testing / dev
+pytest>=7.1.0
+notebook>=6.5.4
+jiwer>=2.6.0
+
+# Optional: accelerate for distributed/inference speedups
+accelerate>=0.18.0
+
+# Backend API
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
