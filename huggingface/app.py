@@ -90,8 +90,14 @@ def load_models():
     checkpoint_path = "wavlm_stutter_classification_best.pth"
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        wavlm_model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded checkpoint with {checkpoint.get('val_accuracy', 'N/A')} accuracy")
+        # Handle both formats: direct state_dict OR wrapped in 'model_state_dict'
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            wavlm_model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"Loaded checkpoint with {checkpoint.get('val_accuracy', 'N/A')} accuracy")
+        else:
+            # Direct state_dict (how train_waveLM.py saves it)
+            wavlm_model.load_state_dict(checkpoint)
+            print("Loaded checkpoint (direct state_dict format)")
     else:
         print("WARNING: No checkpoint found, using random weights")
     
