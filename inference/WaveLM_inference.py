@@ -81,7 +81,7 @@ def predict_chunk(waveform: torch.Tensor, model: WaveLmStutterClassification,
         waveform: Audio tensor (1D, 16kHz)
         model: Loaded WavLM model
         device: Device model is on
-        threshold: Probability threshold for positive prediction (default 0.5)
+        threshold: Probability threshold for positive prediction (default 0.4)
     
     Returns:
         Dict with probabilities and binary predictions for each stutter type
@@ -108,6 +108,12 @@ def predict_chunk(waveform: torch.Tensor, model: WaveLmStutterClassification,
             result['probabilities'][label] = prob
             if prob >= threshold:
                 result['detected'].append(label)
+        
+        # Explicitly label as Fluent if no stutters are detected
+        if not result['detected']:
+            result['label'] = "Fluent"
+        else:
+            result['label'] = ", ".join(result['detected'])
         
         return result
 

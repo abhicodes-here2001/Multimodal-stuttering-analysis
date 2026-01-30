@@ -494,7 +494,10 @@ def save_report_json(report: Dict, output_path: str = None) -> str:
     
     Args:
         report: Report dictionary from generate_clinical_report()
-        output_path: Optional custom path. If None, saves to reports/ folder
+        output_path: Optional custom path. Can be:
+                     - None: saves to default reports/ folder
+                     - A directory path: saves to that directory with auto-generated filename
+                     - A full file path: saves to that exact path
     
     Returns:
         Path to saved file
@@ -504,6 +507,10 @@ def save_report_json(report: Dict, output_path: str = None) -> str:
         reports_dir = os.path.join(project_root, 'reports')
         os.makedirs(reports_dir, exist_ok=True)
         output_path = os.path.join(reports_dir, f"{report['report_id']}.json")
+    elif os.path.isdir(output_path):
+        # If output_path is a directory, add the filename
+        os.makedirs(output_path, exist_ok=True)
+        output_path = os.path.join(output_path, f"{report['report_id']}.json")
     
     with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)

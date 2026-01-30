@@ -1,51 +1,95 @@
-"""
-Hugging Face Spaces - Gradio App for Stutter Analysis
-=====================================================
-This is a standalone Gradio app for deployment on Hugging Face Spaces.
-
-To deploy:
-1. Create a new Space on huggingface.co/spaces
-2. Choose "Gradio" as SDK
-3. Upload this folder's contents
-4. Add your model checkpoint to the Space
-"""
-
 import gradio as gr
 import torch
-import torchaudio
-import tempfile
+import numpy as np
 import os
-import json
+import traceback
 from datetime import datetime
 from transformers import WavLMModel
 import torch.nn as nn
-import whisper
 
-# ============================================================================
-# MODEL DEFINITION (same as models/WaveLm_model.py)
-# ============================================================================
+print(f"APP STARTUP: {datetime.now()}")
+
+# =============================================================================
+# WHY SIGMOID INSTEAD OF SOFTMAX? - A DETAILED EXPLANATION
+# =============================================================================
+"""
+MULTI-LABEL vs MULTI-CLASS CLASSIFICATION
+==========================================
+
+Our stutter detection is a MULTI-LABEL problem:
+- A single 3-second audio chunk can have MULTIPLE stutters simultaneously
+- Example: Someone might have a "Block" AND a "SoundRep" in the same chunk
+- Each of the 5 stutter types is INDEPENDENT of the others
+
+SOFTMAX (❌ NOT suitable for us):
+---------------------------------
+- Used for MULTI-CLASS problems where classes are MUTUALLY EXCLUSIVE
+- Example: "Is this image a Cat OR a Dog?" (can't be both)
+- Formula: softmax(x_i) = exp(x_i) / sum(exp(x_j)) for all j
+- All probabilities MUST sum to 1.0
+- Problem: If we used softmax and got [0.7, 0.1, 0.1, 0.05, 0.05]:
+  - It would say "70% Prolongation" but FORCE other classes to be low
+  - We couldn't detect multiple stutters in one chunk!
+
+SIGMOID (✅ CORRECT for us):
+----------------------------
+- Used for MULTI-LABEL problems where classes are INDEPENDENT
+- Each class gets its own independent probability (0 to 1)
+- Formula: sigmoid(x) = 1 / (1 + exp(-x))
+- Probabilities DON'T need to sum to 1
+- Example output: [0.8, 0.7, 0.2, 0.1, 0.05]
+  - 80% chance of Prolongation
+  - 70% chance of Block  
+  - Both can be detected simultaneously!
+
+THE TRAINING & INFERENCE FLOW:
+==============================
+
+TRAINING:
+---------
+1. Model outputs: LOGITS (raw scores from -∞ to +∞)
+   Example: [2.5, -3.0, 0.1, -1.5, -2.0]
+   
+2. Loss Function: BCEWithLogitsLoss
+   - "WithLogits" means it applies Sigmoid INTERNALLY
+   - More numerically stable than separate Sigmoid + BCELoss
+   - Compares each prediction to each ground truth label independently
+
+INFERENCE (this file):
+----------------------
+1. Model outputs: LOGITS (same as training)
+   Example: [2.5, -3.0, 0.1, -1.5, -2.0]
+   
+2. We manually apply Sigmoid to convert to probabilities:
+   probs = torch.sigmoid(logits)
+   Result: [0.92, 0.05, 0.52, 0.18, 0.12]
+   
+3. Apply threshold (e.g., 0.5) to each probability:
+   - 0.92 > 0.5 → Prolongation DETECTED
+   - 0.05 < 0.5 → Block NOT detected
+   - 0.52 > 0.5 → SoundRep DETECTED
+   - etc.
+
+4. If NO stutters detected (all below threshold):
+   → Label the chunk as "Fluent"
+
+THRESHOLD EXPLAINED:
+====================
+- Default: 0.5 (theoretically neutral, since sigmoid(0) = 0.5)
+- Lower threshold (0.3-0.4): More SENSITIVE, catches more stutters, but more false positives
+- Higher threshold (0.6-0.7): More STRICT, fewer false positives, but might miss subtle stutters
+- The slider in the UI lets users adjust this based on their needs
+- SAME threshold is applied to ALL 5 classes (simplest approach)
+"""
 
 class WaveLmStutterClassification(nn.Module):
-    def __init__(self, num_labels=5, freeze_encoder=True, unfreeze_last_n_layers=1):
+    def __init__(self, num_labels=5):
         super().__init__()
         self.wavlm = WavLMModel.from_pretrained("microsoft/wavlm-base")
         self.hidden_size = self.wavlm.config.hidden_size
-        
-        if freeze_encoder:
-            for param in self.wavlm.parameters():
-                param.requires_grad = False
-            
-            if unfreeze_last_n_layers > 0:
-                for layer in self.wavlm.encoder.layers[-unfreeze_last_n_layers:]:
-                    for param in layer.parameters():
-                        param.requires_grad = True
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(self.hidden_size, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, num_labels)
-        )
+        for param in self.wavlm.parameters():
+            param.requires_grad = False
+        self.classifier = nn.Linear(self.hidden_size, num_labels)
         self.num_labels = num_labels
     
     def forward(self, input_values, attention_mask=None):
@@ -55,292 +99,222 @@ class WaveLmStutterClassification(nn.Module):
         logits = self.classifier(pooled)
         return logits
 
-# ============================================================================
-# STUTTER LABELS & DEFINITIONS
-# ============================================================================
-
 STUTTER_LABELS = ['Prolongation', 'Block', 'SoundRep', 'WordRep', 'Interjection']
 
 STUTTER_DEFINITIONS = {
-    'Prolongation': 'Sound stretched longer than normal (e.g., "Ssssssnake")',
-    'Block': 'Complete stoppage of airflow/sound with tension',
-    'SoundRep': 'Sound/syllable repetition (e.g., "B-b-b-ball")',
-    'WordRep': 'Whole word repetition (e.g., "I-I-I want")',
-    'Interjection': 'Filler words like "um", "uh", "like"'
+    'Prolongation': 'Sound stretched longer than normal',
+    'Block': 'Complete stoppage of airflow/sound',
+    'SoundRep': 'Sound/syllable repetition',
+    'WordRep': 'Whole word repetition',
+    'Interjection': 'Filler words like um, uh'
 }
 
-SEVERITY_THRESHOLDS = {'very_mild': 5, 'mild': 10, 'moderate': 20, 'severe': 30}
-
-# ============================================================================
-# GLOBAL MODEL LOADING
-# ============================================================================
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Device: {device}")
+
 wavlm_model = None
 whisper_model = None
+models_loaded = False
 
 def load_models():
-    global wavlm_model, whisper_model
-    
-    # Load WavLM
-    print("Loading WavLM model...")
-    wavlm_model = WaveLmStutterClassification(num_labels=5)
-    
-    # Try to load checkpoint
-    checkpoint_path = "wavlm_stutter_classification_best.pth"
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        # Handle both formats: direct state_dict OR wrapped in 'model_state_dict'
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            wavlm_model.load_state_dict(checkpoint['model_state_dict'])
-            print(f"Loaded checkpoint with {checkpoint.get('val_accuracy', 'N/A')} accuracy")
-        else:
-            # Direct state_dict (how train_waveLM.py saves it)
-            wavlm_model.load_state_dict(checkpoint)
-            print("Loaded checkpoint (direct state_dict format)")
-    else:
-        print("WARNING: No checkpoint found, using random weights")
-    
-    wavlm_model.to(device)
-    wavlm_model.eval()
-    
-    # Load Whisper
-    print("Loading Whisper model...")
-    whisper_model = whisper.load_model("base", device=device)
-    
-    print("Models loaded!")
-
-# ============================================================================
-# ANALYSIS FUNCTIONS
-# ============================================================================
-
-def preprocess_audio(audio_path):
-    """Convert audio to 16kHz mono"""
-    waveform, sr = torchaudio.load(audio_path)
-    
-    # Convert to mono
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    
-    # Resample to 16kHz
-    if sr != 16000:
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        waveform = resampler(waveform)
-    
-    return waveform.squeeze(0), 16000
-
-def chunk_audio(waveform, sr, chunk_sec=3.0):
-    """Split audio into chunks"""
-    chunk_samples = int(chunk_sec * sr)
-    chunks = []
-    
-    for start in range(0, len(waveform), chunk_samples):
-        end = min(start + chunk_samples, len(waveform))
-        chunk = waveform[start:end]
+    global wavlm_model, whisper_model, models_loaded
+    if models_loaded:
+        return True
+    try:
+        print("Loading WavLM...")
+        wavlm_model = WaveLmStutterClassification(num_labels=5)
+        checkpoint_path = "wavlm_stutter_classification_best.pth"
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                wavlm_model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                wavlm_model.load_state_dict(checkpoint)
+            print("Checkpoint loaded!")
+        wavlm_model.to(device)
+        wavlm_model.eval()
         
-        # Pad if needed
-        if len(chunk) < chunk_samples:
-            chunk = torch.nn.functional.pad(chunk, (0, chunk_samples - len(chunk)))
+        print("Loading Whisper...")
+        import whisper
+        whisper_model = whisper.load_model("base", device=device)
         
-        chunks.append({
-            'chunk': chunk,
-            'start': start / sr,
-            'end': end / sr
-        })
-    
-    return chunks
+        models_loaded = True
+        print("Models loaded!")
+        return True
+    except Exception as e:
+        print(f"Model loading error: {e}")
+        traceback.print_exc()
+        return False
 
-def analyze_chunk(chunk_waveform, threshold=0.5):
-    """Run WavLM on a single chunk"""
+def load_audio(audio_path):
+    print(f"Loading: {audio_path}")
+    try:
+        import librosa
+        waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
+        return torch.from_numpy(waveform).float(), 16000
+    except Exception as e:
+        print(f"librosa error: {e}")
+    try:
+        import soundfile as sf
+        waveform, sr = sf.read(audio_path, dtype='float32')
+        if len(waveform.shape) > 1:
+            waveform = waveform.mean(axis=1)
+        waveform = torch.from_numpy(waveform).float()
+        if sr != 16000:
+            import torchaudio
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform.unsqueeze(0)).squeeze(0)
+        return waveform, 16000
+    except Exception as e:
+        print(f"soundfile error: {e}")
+    raise Exception("Could not load audio")
+
+def analyze_chunk(chunk_tensor, threshold=0.5):
     with torch.no_grad():
-        input_tensor = chunk_waveform.unsqueeze(0).to(device)
-        logits = wavlm_model(input_tensor)
+        logits = wavlm_model(chunk_tensor.unsqueeze(0).to(device))
         probs = torch.sigmoid(logits).cpu().numpy()[0]
-    
     detected = [STUTTER_LABELS[i] for i, p in enumerate(probs) if p > threshold]
-    probabilities = {STUTTER_LABELS[i]: float(probs[i]) for i in range(len(STUTTER_LABELS))}
-    
-    return {'detected': detected, 'probabilities': probabilities}
+    return detected, dict(zip(STUTTER_LABELS, probs.tolist()))
 
-def get_severity(word_stutter_rate):
-    """Calculate severity from word stutter rate"""
-    if word_stutter_rate < SEVERITY_THRESHOLDS['very_mild']:
-        return 'Very Mild', 1
-    elif word_stutter_rate < SEVERITY_THRESHOLDS['mild']:
-        return 'Mild', 2
-    elif word_stutter_rate < SEVERITY_THRESHOLDS['moderate']:
-        return 'Moderate', 3
-    elif word_stutter_rate < SEVERITY_THRESHOLDS['severe']:
-        return 'Severe', 4
-    else:
-        return 'Very Severe', 5
-
-# ============================================================================
-# MAIN ANALYSIS FUNCTION
-# ============================================================================
-
-def analyze_audio(audio_file, threshold=0.5):
-    """Main analysis function for Gradio"""
+def analyze_audio(audio_input, threshold, progress=gr.Progress()):
+    print(f"\n=== ANALYZE CLICKED ===")
+    print(f"Input: {audio_input}, Type: {type(audio_input)}, Threshold: {threshold}")
     
-    if wavlm_model is None:
-        load_models()
+    progress(0, desc="🔄 Starting analysis...")
     
-    if audio_file is None:
-        return "Please upload an audio file", "", "", ""
+    if audio_input is None:
+        return "⚠️ Please upload an audio file first!", "", "", ""
+    
+    audio_path = audio_input
+    if isinstance(audio_input, tuple):
+        import tempfile, soundfile as sf
+        sr, data = audio_input
+        f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf.write(f.name, data, sr)
+        audio_path = f.name
+    
+    if not os.path.exists(audio_path):
+        return f"File not found: {audio_path}", "", "", ""
+    
+    print(f"File: {audio_path}, Size: {os.path.getsize(audio_path)}")
     
     try:
-        # Preprocess
-        waveform, sr = preprocess_audio(audio_file)
+        progress(0.1, desc="🔄 Loading models...")
+        if not models_loaded and not load_models():
+            return "❌ Failed to load models", "", "", ""
+        
+        progress(0.2, desc="🎵 Loading audio file...")
+        waveform, sr = load_audio(audio_path)
         duration = len(waveform) / sr
+        print(f"Duration: {duration:.1f}s")
         
-        # Chunk and analyze with WavLM
-        chunks = chunk_audio(waveform, sr)
-        
-        stutter_counts = {label: 0 for label in STUTTER_LABELS}
+        progress(0.3, desc="✂️ Splitting audio into chunks...")
+        chunk_samples = int(3.0 * sr)
+        stutter_counts = {l: 0 for l in STUTTER_LABELS}
         timeline = []
         
-        for chunk_info in chunks:
-            result = analyze_chunk(chunk_info['chunk'], threshold)
-            for label in result['detected']:
-                stutter_counts[label] += 1
+        total_chunks = (len(waveform) + chunk_samples - 1) // chunk_samples
+        
+        for i, start in enumerate(range(0, len(waveform), chunk_samples)):
+            progress(0.3 + (0.4 * i / total_chunks), desc=f"🔍 Analyzing chunk {i+1}/{total_chunks}...")
             
-            timeline.append({
-                'time': f"{chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s",
-                'detected': ', '.join(result['detected']) if result['detected'] else 'Clear',
-                'probs': result['probabilities']
-            })
-        
-        # Transcribe with Whisper
-        whisper_result = whisper_model.transcribe(audio_file, word_timestamps=True)
-        transcription = whisper_result['text']
-        
-        # Get word-level info
-        words = []
-        if 'segments' in whisper_result:
-            for seg in whisper_result['segments']:
-                if 'words' in seg:
-                    words.extend(seg['words'])
-        
-        # Map stutters to words
-        words_with_stutter = 0
-        annotated_words = []
-        
-        for word_info in words:
-            word_start = word_info.get('start', 0)
-            word_end = word_info.get('end', 0)
-            word_text = word_info.get('word', '')
+            end = min(start + chunk_samples, len(waveform))
+            chunk = waveform[start:end]
+            if len(chunk) < chunk_samples:
+                chunk = torch.nn.functional.pad(chunk, (0, chunk_samples - len(chunk)))
             
-            word_stutters = []
-            for chunk_info in chunks:
-                if word_start < chunk_info['end'] and word_end > chunk_info['start']:
-                    result = analyze_chunk(chunk_info['chunk'], threshold)
-                    word_stutters.extend(result['detected'])
-            
-            word_stutters = list(set(word_stutters))
-            if word_stutters:
-                words_with_stutter += 1
-                annotated_words.append(f"**[{word_text}]**({', '.join(word_stutters)})")
-            else:
-                annotated_words.append(word_text)
+            detected, _ = analyze_chunk(chunk, threshold)
+            for l in detected:
+                stutter_counts[l] += 1
+            timeline.append({"time": f"{start/sr:.1f}-{end/sr:.1f}s", "detected": detected or ["Fluent"]})
         
-        # Calculate metrics
-        total_words = len(words) if words else 1
-        word_stutter_rate = (words_with_stutter / total_words) * 100
-        severity_label, severity_score = get_severity(word_stutter_rate)
+        progress(0.75, desc="🗣️ Transcribing with Whisper...")
+        print("Running Whisper...")
+        transcription = whisper_model.transcribe(audio_path).get('text', '')
         
-        # Format outputs
-        summary = f"""
-## 📊 Analysis Summary
-
-**Duration:** {duration:.1f} seconds  
-**Total Words:** {total_words}  
-**Words with Stutters:** {words_with_stutter} ({word_stutter_rate:.1f}%)
-
-### Severity: {severity_label} ({severity_score}/5)
-
-### Stutter Type Counts:
-"""
-        for label, count in stutter_counts.items():
-            if count > 0:
-                summary += f"- **{label}**: {count} occurrences\n"
+        progress(0.9, desc="📊 Generating report...")
+        total = sum(stutter_counts.values())
+        summary = f"## ✅ Analysis Complete!\n\n**Duration:** {duration:.1f}s\n**Total Stutters Detected:** {total}\n\n### Stutter Counts:\n"
+        for l, c in stutter_counts.items():
+            emoji = "🔴" if c > 0 else "⚪"
+            summary += f"- {emoji} **{l}**: {c}\n"
         
-        # Annotated transcription
-        annotated_text = " ".join(annotated_words) if annotated_words else transcription
+        timeline_md = "| Time | Detected |\n|---|---|\n"
+        for t in timeline[:15]:
+            timeline_md += f"| {t['time']} | {', '.join(t['detected'])} |\n"
+        if len(timeline) > 15:
+            timeline_md += f"\n*...and {len(timeline) - 15} more chunks*"
         
-        # Timeline
-        timeline_text = "| Time | Detected Stutters |\n|------|-------------------|\n"
-        for t in timeline[:15]:  # Limit to 15 rows
-            timeline_text += f"| {t['time']} | {t['detected']} |\n"
+        defs = "## 📖 Stutter Type Definitions\n\n"
+        defs += "\n".join([f"**{k}:** {v}" for k, v in STUTTER_DEFINITIONS.items()])
         
-        # Definitions
-        definitions = "## 📖 Stutter Type Definitions\n\n"
-        for label, desc in STUTTER_DEFINITIONS.items():
-            definitions += f"**{label}:** {desc}\n\n"
-        
-        return summary, annotated_text, timeline_text, definitions
+        progress(1.0, desc="✅ Done!")
+        print("Done!")
+        return summary, transcription, timeline_md, defs
         
     except Exception as e:
-        return f"Error: {str(e)}", "", "", ""
+        print(f"Error: {e}")
+        traceback.print_exc()
+        return f"Error: {e}\n\n{traceback.format_exc()}", "", "", ""
 
-# ============================================================================
-# GRADIO INTERFACE
-# ============================================================================
+print("Building UI...")
 
-with gr.Blocks(title="🎙️ Stutter Analysis", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Stutter Analysis", css="""
+    .loading-text { 
+        font-size: 1.2em; 
+        color: #666; 
+        padding: 20px;
+        text-align: center;
+    }
+""") as demo:
     gr.Markdown("""
     # 🎙️ Speech Fluency Analysis System
     
-    Upload an audio file to analyze stuttering patterns using AI.
+    Upload an audio file to analyze stuttering patterns using AI (WavLM + Whisper).
     
-    **Supported formats:** WAV, MP3, M4A, FLAC
+    **Supported formats:** WAV, MP3, M4A, FLAC, OGG
     """)
     
     with gr.Row():
         with gr.Column(scale=1):
-            audio_input = gr.Audio(
-                label="Upload Audio",
-                type="filepath",
-                sources=["upload", "microphone"]
-            )
-            threshold_slider = gr.Slider(
-                minimum=0.3,
-                maximum=0.7,
-                value=0.5,
+            audio = gr.Audio(label="🎤 Upload Audio", type="filepath")
+            threshold = gr.Slider(
+                minimum=0.3, 
+                maximum=0.7, 
+                value=0.5, 
                 step=0.05,
                 label="Detection Threshold",
-                info="Lower = more sensitive, Higher = more conservative"
+                info="Lower = more sensitive, Higher = more strict"
             )
-            analyze_btn = gr.Button("🔍 Analyze Speech", variant="primary")
+            btn = gr.Button("🔍 Analyze Speech", variant="primary", size="lg")
+            gr.Markdown("*Analysis takes 30-60 seconds depending on audio length*")
         
         with gr.Column(scale=2):
-            summary_output = gr.Markdown(label="Summary")
+            summary = gr.Markdown(value="### 👆 Upload audio and click Analyze to start")
     
     with gr.Tabs():
-        with gr.Tab("📝 Transcription"):
-            transcription_output = gr.Markdown(label="Annotated Transcription")
-        
-        with gr.Tab("📈 Timeline"):
-            timeline_output = gr.Markdown(label="Timeline Analysis")
-        
-        with gr.Tab("📖 Definitions"):
-            definitions_output = gr.Markdown(label="Stutter Definitions")
-    
-    analyze_btn.click(
-        fn=analyze_audio,
-        inputs=[audio_input, threshold_slider],
-        outputs=[summary_output, transcription_output, timeline_output, definitions_output]
-    )
+        with gr.TabItem("📝 Transcription"):
+            trans = gr.Markdown()
+        with gr.TabItem("📈 Timeline"):
+            timeline = gr.Markdown()
+        with gr.TabItem("📖 Definitions"):
+            defs = gr.Markdown()
     
     gr.Markdown("""
     ---
-    **Disclaimer:** This tool is for educational/research purposes. 
-    Consult a qualified speech-language pathologist for clinical diagnosis.
-    
-    Built with WavLM + Whisper | [GitHub](https://github.com/abhicodes-here2001/Multimodal-stuttering-analysis)
+    **Note:** The spinner will appear while processing. Please wait for analysis to complete.
     """)
+    
+    # The show_progress parameter shows a spinner during processing
+    btn.click(
+        fn=analyze_audio, 
+        inputs=[audio, threshold], 
+        outputs=[summary, trans, timeline, defs],
+        show_progress="full"  # Shows loading spinner
+    )
 
-# Load models on startup
+print("Loading models...")
 load_models()
 
-if __name__ == "__main__":
-    demo.launch()
+print("Launching...")
+demo.queue()
+demo.launch(ssr_mode=False)

@@ -34,6 +34,34 @@ from inference.WaveLM_inference import load_wavlm_model
 from inference.Whisper_inference import load_whisper_model
 
 # ============================================================================
+# SEVERITY CALCULATION
+# ============================================================================
+
+STUTTER_DEFINITIONS = {
+    'Prolongation': 'Sound stretched longer than normal (e.g., "Ssssssnake")',
+    'Block': 'Complete stoppage of airflow/sound with tension',
+    'SoundRep': 'Sound/syllable repetition (e.g., "B-b-b-ball")',
+    'WordRep': 'Whole word repetition (e.g., "I-I-I want")',
+    'Interjection': 'Filler words like "um", "uh", "like"'
+}
+
+SEVERITY_THRESHOLDS = {'very_mild': 5, 'mild': 10, 'moderate': 20, 'severe': 30}
+
+def get_severity(word_stutter_rate):
+    """Calculate severity from word stutter rate"""
+    if word_stutter_rate < SEVERITY_THRESHOLDS['very_mild']:
+        return 'Very Mild', 1
+    elif word_stutter_rate < SEVERITY_THRESHOLDS['mild']:
+        return 'Mild', 2
+    elif word_stutter_rate < SEVERITY_THRESHOLDS['moderate']:
+        return 'Moderate', 3
+    elif word_stutter_rate < SEVERITY_THRESHOLDS['severe']:
+        return 'Severe', 4
+    else:
+        return 'Very Severe', 5
+
+
+# ============================================================================
 # FASTAPI APP SETUP
 # ============================================================================
 
@@ -184,10 +212,46 @@ async def analyze_audio(
             whisper_model=whisper_model,
             threshold=threshold
         )
+
+        # Add an 'analysis' key for frontend compatibility
+        # Map the metrics to the structure expected by the React frontend
+        metrics = report['metrics']
+        type_dist = metrics['type_distribution']
         
-        # Save the report
-        report_path = save_report_json(report)
-        report['report_path'] = report_path
+        report['analysis'] = {
+            'word_stutter_rate': metrics['word_stutter_rate'],
+            'total_stutters': metrics.get('total_stutter_instances', 0),
+            'total_words': metrics['total_words'],
+            'fluent_words': metrics['total_words'] - metrics['words_with_stutter'],
+            'disfluent_words': metrics['words_with_stutter'],
+            'prolongations': type_dist.get('Prolongation', {}).get('count', 0),
+            'blocks': type_dist.get('Block', {}).get('count', 0),
+            'sound_repetitions': type_dist.get('SoundRep', {}).get('count', 0),
+            'word_repetitions': type_dist.get('WordRep', {}).get('count', 0),
+            'interjections': type_dist.get('Interjection', {}).get('count', 0),
+            'stutter_type_distribution': {
+                k: v['count'] for k, v in type_dist.items()
+            },
+            'severity_assessment': {
+                'level_name': report['severity']['label'],
+                'level_value': report['severity']['score'],
+                'word_stutter_rate': metrics['word_stutter_rate']
+            }
+        }
+        
+        # Add transcription sample for overview
+        full_text = report['transcription']['full_text']
+        report['transcription_sample'] = full_text[:200] + '...' if len(full_text) > 200 else full_text
+        
+        # Add metadata for frontend
+        report['metadata'] = {
+            'duration': metrics['total_duration_sec'],
+            'speaking_rate': metrics['speaking_rate_wpm']
+        }
+        
+        # Save the final report
+        # Pass None to use default naming convention, or full path to specifying file
+        save_report_json(report, None)
         
         return JSONResponse(content=report)
     

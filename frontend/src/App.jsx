@@ -18,6 +18,7 @@ const STUTTER_COLORS = {
 };
 
 const SEVERITY_COLORS = ['#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444'];
+const SEVERITY_NAMES = ['Very Mild', 'Mild', 'Moderate', 'Severe', 'Very Severe'];
 
 function App() {
   const [file, setFile] = useState(null);
@@ -28,6 +29,7 @@ function App() {
   const [error, setError] = useState(null);
   const [report, setReport] = useState(null);
   const [activeTab, setActiveTab] = useState('overview');
+  const [threshold, setThreshold] = useState(0.4);
   const fileRef = useRef(null);
 
   const handleSubmit = async (e) => {
@@ -42,7 +44,7 @@ function App() {
     formData.append('patient_name', patientName || 'Anonymous');
     formData.append('patient_id', patientId || '');
     formData.append('clinician_name', clinicianName || '');
-    formData.append('threshold', 0.4);
+    formData.append('threshold', threshold);
 
     try {
       const res = await axios.post(`${API_URL}/analyze`, formData);
@@ -58,7 +60,15 @@ function App() {
   if (!report) {
     return (
       <div className="upload-page">
-        <div className="upload-box">
+        <div className="upload-box" style={{ position: 'relative' }}>
+          {loading && (
+            <div className="loading-overlay">
+              <div className="spinner"></div>
+              <p className="loading-text">Analyzing Audio...</p>
+              <p className="loading-subtext">This may take a minute or two depending on file size.</p>
+            </div>
+          )}
+
           <div className="upload-header">
             <div className="logo">🎙️</div>
             <h1>Speech Fluency Analysis</h1>
@@ -101,23 +111,35 @@ function App() {
               />
               <input 
                 type="text" 
-                placeholder="Patient ID" 
+                placeholder="Patient ID (Optional)" 
                 value={patientId}
                 onChange={(e) => setPatientId(e.target.value)}
               />
             </div>
             <input 
               type="text" 
-              placeholder="Clinician Name" 
+              placeholder="Clinician Name (Optional)" 
               value={clinicianName}
               onChange={(e) => setClinicianName(e.target.value)}
             />
 
-            {error && <div className="error">{error}</div>}
+            <div className="threshold-slider">
+              <label>Detection Threshold: <span>{threshold.toFixed(2)}</span></label>
+              <p>Lower is more sensitive, higher is more conservative.</p>
+              <input 
+                type="range" 
+                min="0.1" 
+                max="0.9" 
+                step="0.05"
+                value={threshold}
+                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+              />
+            </div>
 
             <button type="submit" disabled={loading || !file}>
               {loading ? 'Analyzing...' : 'Analyze Speech'}
             </button>
+            {error && <p className="error-message">{error}</p>}
           </form>
         </div>
       </div>
@@ -125,15 +147,21 @@ function App() {
   }
 
   // Report Page
-  const { metrics, stutter_analysis, chart_data, recommendations } = report;
-  const wordLevel = stutter_analysis?.word_level || [];
-  const timeline = stutter_analysis?.timeline || [];
-  const typeData = chart_data?.type_distribution || [];
+  const { analysis, metadata } = report;
+  
+  // Extract detailed analysis data that might be nested
+  const wordLevel = report.stutter_analysis?.word_level || [];
+  const timeline = report.stutter_analysis?.timeline || report.chart_data?.timeline || [];
+
+  const pieData = Object.entries(analysis.stutter_type_distribution)
+    .map(([name, value]) => ({ name, value }))
+    .filter(d => d.value > 0);
+
+  const severity = analysis.severity_assessment;
 
   return (
     <div className="report-page">
-      {/* Header */}
-      <header className="header">
+      <header className="report-header">
         <div className="header-left">
           <span className="header-logo">🎙️</span>
           <div>
@@ -160,16 +188,26 @@ function App() {
         </div>
       </header>
 
-      {/* Patient Bar */}
-      <div className="patient-bar">
-        <span><strong>Patient:</strong> {report.patient_info?.name}</span>
-        <span><strong>ID:</strong> {report.patient_info?.id || 'N/A'}</span>
-        <span><strong>Clinician:</strong> {report.clinician || 'N/A'}</span>
-        <span><strong>Date:</strong> {new Date(report.generated_at).toLocaleDateString()}</span>
-      </div>
+      <nav className="report-nav">
+        <div className="nav-item">
+          <span>Patient:</span>
+          <strong>{report.patient_info?.name}</strong>
+        </div>
+        <div className="nav-item">
+          <span>ID:</span>
+          <strong>{report.patient_info?.id || 'N/A'}</strong>
+        </div>
+        <div className="nav-item">
+          <span>Clinician:</span>
+          <strong>{report.clinician || 'N/A'}</strong>
+        </div>
+        <div className="nav-item">
+          <span>Date:</span>
+          <strong>{new Date(report.generated_at).toLocaleDateString()}</strong>
+        </div>
+      </nav>
 
-      {/* Tabs */}
-      <nav className="tabs">
+      <div className="tabs">
         {['overview', 'transcription', 'timeline', 'details'].map(tab => (
           <button 
             key={tab}
@@ -179,109 +217,95 @@ function App() {
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
-      </nav>
+      </div>
 
-      {/* Content */}
-      <main className="content">
+      <main className="report-content">
         {activeTab === 'overview' && (
           <div className="overview">
-            {/* Top Row: Severity + Metrics */}
-            <div className="top-row">
-              <div className="severity-card">
-                <h3>Severity Score</h3>
-                <div className="severity-display">
-                  <div 
-                    className="severity-circle"
-                    style={{ borderColor: SEVERITY_COLORS[metrics.severity_score - 1] }}
-                  >
-                    <span className="score">{metrics.severity_score}</span>
-                    <span className="max">/5</span>
-                  </div>
-                  <span 
-                    className="severity-label"
-                    style={{ color: SEVERITY_COLORS[metrics.severity_score - 1] }}
-                  >
-                    {metrics.severity_label}
-                  </span>
-                </div>
-              </div>
-
-              <div className="metrics-row">
-                <div className="metric">
-                  <span className="metric-value">{metrics.chunk_stutter_rate}%</span>
-                  <span className="metric-label">Stutter Rate</span>
-                </div>
-                <div className="metric">
-                  <span className="metric-value">{metrics.words_with_stutter}/{metrics.total_words}</span>
-                  <span className="metric-label">Words Affected</span>
-                </div>
-                <div className="metric">
-                  <span className="metric-value">{metrics.total_duration_sec}s</span>
-                  <span className="metric-label">Duration</span>
-                </div>
-                <div className="metric">
-                  <span className="metric-value">{metrics.speaking_rate_wpm}</span>
-                  <span className="metric-label">Words/Min</span>
-                </div>
-              </div>
+            <div className="overview-header">
+              <h2>Analysis Overview</h2>
             </div>
 
-            {/* Charts Row */}
-            <div className="charts-row">
-              <div className="chart-card">
-                <h3>Stutter Types</h3>
-                <div className="chart-container">
-                  <ResponsiveContainer width="100%" height={180}>
-                    <PieChart>
-                      <Pie
-                        data={typeData.filter(d => d.value > 0)}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={40}
-                        outerRadius={70}
-                        dataKey="value"
-                      >
-                        {typeData.map((entry, i) => (
-                          <Cell key={i} fill={STUTTER_COLORS[entry.name]} />
-                        ))}
-                      </Pie>
-                      <Tooltip />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="chart-legend">
-                    {typeData.map((t, i) => (
-                      <div key={i} className="legend-item">
-                        <span className="dot" style={{ background: STUTTER_COLORS[t.name] }}></span>
-                        <span>{t.name}</span>
-                        <span className="count">{t.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="chart-card">
-                <h3>Timeline Pattern</h3>
-                <ResponsiveContainer width="100%" height={180}>
-                  <AreaChart data={timeline.map(t => ({ time: t.time.toFixed(1), count: t.stutter_count }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="time" tick={{ fontSize: 10 }} />
-                    <YAxis tick={{ fontSize: 10 }} />
+            <div className="overview-grid">
+              <div className="grid-item chart-container">
+                <h3>Stutter Type Distribution</h3>
+                <ResponsiveContainer width="100%" height={250}>
+                  <PieChart>
+                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+                      {pieData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={STUTTER_COLORS[entry.name]} />
+                      ))}
+                    </Pie>
                     <Tooltip />
-                    <Area type="monotone" dataKey="count" stroke="#6366f1" fill="#6366f1" fillOpacity={0.3} />
-                  </AreaChart>
+                    <Legend />
+                  </PieChart>
                 </ResponsiveContainer>
               </div>
+
+              <div className="grid-item severity-meter">
+                <h3>Overall Severity</h3>
+                <div className="meter-container">
+                  <div className="meter-bar">
+                    {SEVERITY_NAMES.map((name, index) => (
+                      <div 
+                        key={name}
+                        className={`meter-segment ${severity.level_value === index + 1 ? 'active' : ''}`}
+                        style={{ backgroundColor: SEVERITY_COLORS[index] }}
+                      ></div>
+                    ))}
+                  </div>
+                  <div 
+                    className="meter-indicator" 
+                    style={{ left: `${((severity.level_value - 0.5) / 5) * 100}%` }}
+                  >
+                    <div className="indicator-head"></div>
+                    <div className="indicator-line"></div>
+                  </div>
+                </div>
+                <p className="severity-label" style={{ color: SEVERITY_COLORS[severity.level_value - 1] }}>
+                  {severity.level_name}
+                </p>
+                <p className="severity-detail">Based on a word stutter rate of {severity.word_stutter_rate.toFixed(2)}%</p>
+              </div>
+
+              <div className="grid-item transcript-preview">
+                <h3>Transcription Highlight</h3>
+                <div className="transcript-sample">
+                  {report.transcription_sample}
+                </div>
+              </div>
             </div>
 
-            {/* Recommendations */}
-            <div className="recommendations">
-              <h3>Clinical Recommendations</h3>
-              <ul>
-                {recommendations?.map((rec, i) => (
-                  <li key={i}>{rec}</li>
-                ))}
-              </ul>
+            <div className="overview-details">
+              <h3>Analysis Details</h3>
+              <div className="details-item">
+                <span className="detail-label">Total Words:</span>
+                <span className="detail-value">{analysis.total_words}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Fluent Words:</span>
+                <span className="detail-value">{analysis.fluent_words}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Disfluent Words:</span>
+                <span className="detail-value">{analysis.disfluent_words}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Prolongations:</span>
+                <span className="detail-value">{analysis.prolongations}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Blocks:</span>
+                <span className="detail-value">{analysis.blocks}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Sound Repetitions:</span>
+                <span className="detail-value">{analysis.sound_repetitions}</span>
+              </div>
+              <div className="details-item">
+                <span className="detail-label">Word Repetitions:</span>
+                <span className="detail-value">{analysis.word_repetitions}</span>
+              </div>
             </div>
           </div>
         )}
