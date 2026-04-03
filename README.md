@@ -1,4 +1,4 @@
-# 🎙️ Multimodal Stuttering Analysis System# 🎙️ Multimodal Stuttering Analysis System
+# 🎙️ Multimodel Stuttering Analysis System# 🎙️ Multimodal Stuttering Analysis System
 
 
 
