@@ -2,7 +2,7 @@
 
 
 
-A comprehensive AI-powered clinical tool for analyzing speech disfluencies (stuttering) using multimodal deep learning. Combines **WavLM** for acoustic stutter detection and **Whisper** for transcription to generate detailed clinical reports.> **AI-powered speech analysis tool for detecting and classifying stuttering patterns using deep learning**
+A comprehensive AI-powered clinical tool for analyzing speech disfluencies (stuttering) using multimodel deep learning. Combines **WavLM** for acoustic stutter detection and **Whisper** for transcription to generate detailed clinical reports.> **AI-powered speech analysis tool for detecting and classifying stuttering patterns using deep learning**
 
 
 
